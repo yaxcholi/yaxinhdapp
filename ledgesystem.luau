@@ -212,13 +212,13 @@ RaycastFilter.FilterDescendantsInstances = {Character}
 
 -- sound that plays whenever we grab onto a ledge
 local GrabSound = Instance.new("Sound")
-GrabSound.SoundId = "rbxassetid://67" --hahaha 6767 haha pls dont fail my app for thiis hahaha
+GrabSound.SoundId = "rbxassetid://79480035097773"
 GrabSound.Volume = 0.6
 GrabSound.Parent = RootPart
 
 -- sound that plays whenever we climb up and off a ledge
 local ClimbSound = Instance.new("Sound")
-ClimbSound.SoundId = "rbxassetid://67"
+ClimbSound.SoundId = "rbxassetid://9116634613"
 ClimbSound.Volume = 0.6
 ClimbSound.Parent = RootPart
 
