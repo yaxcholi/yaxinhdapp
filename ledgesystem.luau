@@ -147,19 +147,19 @@ ClimbSound.SoundId = "rbxassetid://79480035097773"
 ClimbSound.Volume = 0.6
 ClimbSound.Parent = RootPart
 
--- hooking the sounds up to the signals so they play automatically
+
 LedgeGrabbed:Connect(function()
-	GrabSound:Play()
+	GrabSound:Play() --play grab sound whenever ledgegrabbed
 end)
 
 LedgeReleased:Connect(function()
-	ClimbSound:Play()
+	ClimbSound:Play() --play climb sound whenever ledgereleased
 end)
 
-local function GetLedgeTop(RaycastResult)
-	local Instance = RaycastResult.Instance
+local function GetLedgeTop(RaycastResult) -- function that lets us the top surface of a part
+	local Instance = RaycastResult.Instance -- get the actual part the ray hit
 	local PartCFrame = Instance.CFrame -- grab the parts cframe so we know which way its rotated
-	local Size = Instance.Size
+	local Size = Instance.Size --  get the parts size so we know how far each face is from its center
 
 	local Axes = {
 		{Direction = PartCFrame.RightVector,  Size = Size.X}, -- checks the right face for how upward it points
