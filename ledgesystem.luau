@@ -8,29 +8,29 @@ local Debris = game:GetService("Debris")
 local CollectionService = game:GetService("CollectionService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
--- this is where all our animation objects live, we just grab the folder once up front
-local AnimationFolder = ReplicatedStorage:WaitForChild("Animations")
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local ContextActionService = game:GetService("ContextActionService")
+local TweenService = game:GetService("TweenService")
+local Debris = game:GetService("Debris")
+local CollectionService = game:GetService("CollectionService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
--- grabbing the local players Character stuff well need everywhere in this script.
--- we use "Player.Character or Player.CharacterAdded:Wait()" instead of just
--- Player.Character on its own because Character can be nil for a bit when the script runs or when we spawn in if we just read
--- Player.Character directly and it happened to be nil, every WaitForChild below
--- would error out immediately.
-local Player = Players.LocalPlayer
-local Character = Player.Character or Player.CharacterAdded:Wait()
-local Humanoid = Character:WaitForChild("Humanoid")
-local RootPart = Character:WaitForChild("HumanoidRootPart")
-local Head = Character:WaitForChild("Head")
-local Animator = Humanoid:WaitForChild("Animator")
+local AnimationFolder = ReplicatedStorage:WaitForChild("Animations") -- grab the folder that holds all our animation objects
 
--- LoadAnimation caches the animation onto the Animator once
-local IdleGrabAnimation = Animator:LoadAnimation(AnimationFolder:WaitForChild("GrabIdle"))
-local LeftGrabAnimation = Animator:LoadAnimation(AnimationFolder:WaitForChild("GrabLeft"))
-local RightGrabAnimation = Animator:LoadAnimation(AnimationFolder:WaitForChild("GrabRight"))
-local JumpGrabAnimation = Animator:LoadAnimation(AnimationFolder:WaitForChild("GrabJump"))
+local Player = Players.LocalPlayer -- get the local player
+local Character = Player.Character or Player.CharacterAdded:Wait() -- get the character, waiting for it to spawn if it isnt loaded yet so the WaitForChilds below dont error on nil
+local Humanoid = Character:WaitForChild("Humanoid") -- get the characters humanoid
+local RootPart = Character:WaitForChild("HumanoidRootPart") -- get the characters root part
+local Head = Character:WaitForChild("Head") -- get the characters head
+local Animator = Humanoid:WaitForChild("Animator") -- get the humanoids animator to load animations through
 
--- any part tagged with this in CollectionService counts as something you can grab onto so even map designers just add the tag and the script would work fine
-local LEDGE_TAG = "Ledge"
+local IdleGrabAnimation = Animator:LoadAnimation(AnimationFolder:WaitForChild("GrabIdle")) -- load and cache the idle hang animation
+local LeftGrabAnimation = Animator:LoadAnimation(AnimationFolder:WaitForChild("GrabLeft")) -- load and cache the left grab animation
+local RightGrabAnimation = Animator:LoadAnimation(AnimationFolder:WaitForChild("GrabRight")) -- load and cache the right grab animation
+local JumpGrabAnimation = Animator:LoadAnimation(AnimationFolder:WaitForChild("GrabJump")) -- load and cache the climb animation
+
+local LEDGE_TAG = "Ledge" -- any part tagged with this in CollectionService counts as something grabbable, so map designers can just tag parts and it works
 
 -- all our tunable numbers live up here so were not hunting through the script to tweak them later
 local DetectDistance = 5        -- how far in front of us we check for a ledge
@@ -43,114 +43,77 @@ local GrabCooldown = 0.2         -- how long after climbing up before were allow
 local SideMoveDistance = 10      -- how far sideways we cast a ray to look for side ledges
 local SideMoveDelay = 0.3        -- cooldown between sideways moves so it cant be spammed
 
-
---roblox already gives us BindableEvent for this kind of thing, but i built this small custom
---class instead which was mainly inspired by goodsignal
---i went with my own version over just using a BindableEvent because:
--- 1) a BindableEvent is a real Instance, so it has to be parented somewhere, shows up in the
---    Explorer, and carries the weight of being a full game object just to pass a signal around.
---    this is just a plain lua table, costs basically nothing and never needs to be parented or destroyed
--- 2) a BindableEvent only gives you :Fire(), :Connect(), :Wait(), theres no way to see whats
---    actually listening to it. with my own table i can just look at Listeners directly if i ever need to debug it
-
---the signal class here is just:
---a table (Listeners) = {} which holds a list of things to call
---a :Connect(fn) method that adds a function that list and hands back a Connection object
---a :Fire(...) method that calls all the functions in the list
 local Signal = {}
-Signal.__index = Signal
+Signal.__index = Signal -- set the metatable index so signal instances can find the methods below
 
 local Connection = {}
-Connection.__index = Connection
+Connection.__index = Connection -- set the metatable index so connection instances can find the methods below
 
--- a Connection is just a little wrapper that remembers one listener function
--- and whether its still hooked up or not
 function Connection.new(SignalRef, Fn)
 	return setmetatable({
-		Connected = true, -- starts off connected, this switches to false once :Disconnect() is called
-		SignalRef = SignalRef,
-		Fn = Fn,
+		Connected = true, -- start connected, switches to false once disconnect is called
+		SignalRef = SignalRef, -- keep a reference back to the signal for debugging
+		Fn = Fn, -- store the listener function to call later
 	}, Connection)
 end
 
--- switches Connected to false, doesnt actually remove it from the list,
--- Signal:Fire just skips over it next time because it checks this 
--- we do it this way instead of doing table.remove immediately
--- because removing an item from a table while something else might still be
--- looping over that same table causes errors and bugs
-function Connection:Disconnect()
-	self.Connected = false
+function Connection:Disconnect() --never called
+	if not self.Connected then return end -- return early if already disconnected
+	self.Connected = false -- mark the connection as no longer active, fire skips it from here on instead of removing it mid loop
 end
 
--- makes a fresh signal with an empty list of listeners
-function Signal.new() --
+function Signal.new()
 	return setmetatable({
-		Listeners = {},
+		Listeners = {}, -- start with an empty list of listeners
 	}, Signal)
 end
 
--- hooks up a new function to be called whenever this signal fires,
--- hands back a Connection object in case you ever want to disconnect it later
 function Signal:Connect(Fn)
-	local ConnectionObject = Connection.new(self, Fn)
-	table.insert(self.Listeners, ConnectionObject)
-	return ConnectionObject
+	local ConnectionObject = Connection.new(self, Fn) -- wrap the listener function in a connection object
+	table.insert(self.Listeners, ConnectionObject) -- add it to the list of listeners
+	return ConnectionObject -- hand back the connection in case its needed to disconnect later
 end
 
--- calls every connected listener, passing along whatever arguments were given to Fire
-function Signal:Fire(...) --
-	local ListenersSnapshot = table.clone(self.Listeners) --the reason why do this relates back to my Connected = true, Connected = false,
-	--because if i were to simply remove an item from a list while actively looping over that same list i would get index errors or skipped elements.
-	--so we clone this array before looping, so if a listener disconnects itself
+function Signal:Fire(...)
+	local ListenersSnapshot = table.clone(self.Listeners) -- clone the list before looping so disconnecting mid fire cant cause index errors or skipped listeners
 	for _, ConnectionObject in ListenersSnapshot do
 		if ConnectionObject.Connected then
-			--each listener gets called through task.spawn instead of directly so it gets its own thread so errors would only ever affect that listener
-			task.spawn(ConnectionObject.Fn, ...)
+			task.spawn(ConnectionObject.Fn, ...) -- call the listener on its own thread so an error in it cant affect the others
 		end
 	end
 end
 
 
--- LedgeGrabbed/LedgeReleased as signals rather thanjust calling GrabSound:Play() directly inside the grabbing code means the
--- code that detects and performs a grab doesnt need to know or care that a sound even exists
-
---the ClimbState class is like a tiny state machine but obviously falls short under most FSMs, i could have just used three booleans like Hanging, CanGrab, CanSideMove, etc instead
---of wrapping them in a class, but this gives us more control over it, and it is a lot easier to work with. mainly because the transitions between states have rules
---that belong together 
 local ClimbState = {}
-ClimbState.__index = ClimbState
+ClimbState.__index = ClimbState -- set the metatable index so instances can find the methods below
 
--- sets up the starting state which sets up not hanging yet, allowed to grab, allowed to side-move
 function ClimbState.new()
 	return setmetatable({
 		Hanging = false, -- true when actively hanging on a ledge
-		CanGrab = true, -- false right after grabbing/climbing
-		CanSideMove = true, --has a brief cooldown so it cant be spammed
-	}, ClimbState)
+		CanGrab = true, -- false right after grabbing or climbing
+		CanSideMove = true, -- false while on cooldown from a recent side move
+	}, ClimbState) -- create a new state table with the starting values
 end
 
-function ClimbState:BeginHang() --by wrapping it in a class with methods like BeginHang() the rule gets baked into the method itself
-	--this now means there only exactly one place in the whole script where this entering hang state is define and its impossible to enter it correctly
-	self.Hanging = true
-	self.CanGrab = false
+function ClimbState:BeginHang()
+	self.Hanging = true -- mark the state as hanging
+	self.CanGrab = false -- disallow grabbing again while already hanging
 end
 
--- sets Hanging to false whenever we let go or climb up
 function ClimbState:EndHang()
-	self.Hanging = false
+	self.Hanging = false -- mark the state as no longer hanging
 end
 
-function ClimbState:LockSideMove(Duration) -- this is the same idea as BeginHang, well never have to write a separate task.delay everytime i call LockSideMove
-	self.CanSideMove = false
-	task.delay(Duration, function() --we delay this to lock out movement to spam
-		self.CanSideMove = true
+function ClimbState:LockSideMove(Duration)
+	self.CanSideMove = false -- disallow side moving immediately
+	task.delay(Duration, function() -- wait out the duration before allowing it again
+		self.CanSideMove = true -- allow side moving again
 	end)
 end
 
--- lets us re-enable grabbing after some delay, used after climbing up so you cant instantly re-grab the same ledge you just climbed off of
 function ClimbState:AllowGrabAfter(Duration)
-	task.delay(Duration, function()
-		self.CanGrab = true
+	task.delay(Duration, function() -- wait out the duration before allowing grabbing again
+		self.CanGrab = true -- allow grabbing again
 	end)
 end
 
@@ -167,58 +130,20 @@ local AnchorAttachment = nil
 local PositionAlign = nil
 local OrientationAlign = nil
 
---everything about detecting a ledge in this system boils down to using Raycasting, we shoot an invisible line from a point in a direction for some length
 
--- quick rundown of how the raycasting in this script actually works:
---
--- workspace:Raycast(origin, direction, raycastParams) is the method that actually
--- performs a raycast. origin is a Vector3 where the ray starts, direction is a
--- Vector3 that points which way the ray goes and how far (its length/magnitude
--- is the max distance), and raycastParams is an optional RaycastParams object
--- that controls what the ray is allowed to hit
---
--- if the ray hits something, Raycast returns a RaycastResult with fields like
--- .Instance (the part that got hit), .Position (world position of the hit),
--- .Normal (the direction the hit surface is facing), and .Distance. if it hits
--- nothing, it just returns nil
---
--- RaycastParams is that config object mentioned above. the two properties we
--- use on it are FilterType (Enum.RaycastFilterType.Include or .Exclude) and
--- FilterDescendantsInstances (a list of instances to include/exclude, including
--- their children). we set FilterType to Exclude and hand it our own Character,
--- so the ray ignores our own body and only reports hits against other parts
---
--- i originally looked into how other people build these systems, and a lot of
--- ledge/vault setups (see a devforum thread on this: https://devforum.roblox.com/t/ledge-system-help/4300804/14)
--- use several raycasts stacked together every frame: one cast forward to find
--- an obstacle (whatever the raycast is hitting), then a handful of casts upward near that obstacle to feel out
--- where the clear space starts, then another cast forward from up there to
--- confirm that space is actually open
---
--- my version skips most of that because every grabbable part is already tagged
--- with LEDGE_TAG ahead of time, so i dont need to blindly search for where an
--- obstacles edge is. i only need 2 raycasts, one forward cast to detect the tagged ledge part at all (below, and
--- again in the RunService.Heartbeat loop further down), and one more upward
--- cast in HasClearHeadroom to make sure theres a space above the exact top
--- surface that GetLedgeTops dot product math already calculated for me.
--- rather than searching for the surface and the clearance blindly with a bunch
--- of raycasts, i split the work by letting the math finding the surface and then one raycast just
--- doublechecks the space above it is free
-local RaycastFilter = RaycastParams.new()
---this exists so the ray doesnt detect the characters own body as a wall in front of itself
-RaycastFilter.FilterType = Enum.RaycastFilterType.Exclude
-RaycastFilter.FilterDescendantsInstances = {Character}
---this raycast extends back to IsClimbableLedge which filters what kind of hit counts.
 
--- sound that plays whenever we grab onto a ledge
+local RaycastFilter = RaycastParams.new() -- create the raycast params well reuse for every ledge detection cast
+RaycastFilter.FilterType = Enum.RaycastFilterType.Exclude -- exclude instead of include so we can just list what to ignore
+RaycastFilter.FilterDescendantsInstances = {Character} -- ignore the characters own body so it doesnt detect itself as a wall
+
+
 local GrabSound = Instance.new("Sound")
-GrabSound.SoundId = "rbxassetid://79480035097773"
-GrabSound.Volume = 0.6
-GrabSound.Parent = RootPart
+GrabSound.SoundId = "rbxassetid://9116634613" -- sound that plays whenever we grab onto a ledge
+GrabSound.Volume = 0.6 -- 0.6 volume so its not too loud
+GrabSound.Parent = RootPart --parent to RootPart of the player
 
--- sound that plays whenever we climb up and off a ledge
 local ClimbSound = Instance.new("Sound")
-ClimbSound.SoundId = "rbxassetid://9116634613"
+ClimbSound.SoundId = "rbxassetid://79480035097773"
 ClimbSound.Volume = 0.6
 ClimbSound.Parent = RootPart
 
@@ -231,374 +156,270 @@ LedgeReleased:Connect(function()
 	ClimbSound:Play()
 end)
 
---this is the math heavy part of this script, it is what determines the surface of a ledge to grab onto
---basically we just look at all the vectors of a part and using some math we can get the Dot product of every vector to the worlds up vector (0, 1, 0) with being closer to 1 means upwards
 local function GetLedgeTop(RaycastResult)
 	local Instance = RaycastResult.Instance
-	local PartCFrame = Instance.CFrame --grab the parts CFrame so we know which way its rotated
+	local PartCFrame = Instance.CFrame -- grab the parts cframe so we know which way its rotated
 	local Size = Instance.Size
+
 	local Axes = {
-		{Direction = PartCFrame.RightVector,  Size = Size.X}, --one side of the part along its X axis
-		{Direction = -PartCFrame.RightVector, Size = Size.X}, --and the opposite side, same axis just flipped
-		{Direction = PartCFrame.UpVector,      Size = Size.Y}, --one side along its Y axis (normally "up" if the part isnt rotated)
-		{Direction = -PartCFrame.UpVector,     Size = Size.Y}, --the flipped version, matters if the part is upside down
-		{Direction = PartCFrame.LookVector,    Size = Size.Z}, --one side along its Z axis
-		{Direction = -PartCFrame.LookVector,   Size = Size.Z}, --and the flipped version of that too
-	}
-	--basically every part has 6 sides/faces and we dont know ahead of time which one is actually facing up since the part could be rotated any which way. so we just grab all 6
-	--directions here and check them one by one below. if we only checked 3 we could easily miss the real top face when a part is flipped or turned weird.
+		{Direction = PartCFrame.RightVector,  Size = Size.X}, -- checks the right face for how upward it points
+		{Direction = -PartCFrame.RightVector, Size = Size.X}, -- checks the left face for how upward it points
+		{Direction = PartCFrame.UpVector,      Size = Size.Y}, -- checks the top face for how upward it points
+		{Direction = -PartCFrame.UpVector,     Size = Size.Y}, -- checks the bottom face for how upward it points
+		{Direction = PartCFrame.LookVector,    Size = Size.Z}, -- checks the front face for how upward it points
+		{Direction = -PartCFrame.LookVector,   Size = Size.Z}, -- checks the back face for how upward it points
+	} -- build all 6 face directions since we dont know ahead of time which one is actually facing up
 
-	-- start with face 1 as a placeholder guess, just so these variables
-	-- arent empty before the loop runs. this does not mean face 1 is
-	-- actually the best one, its just filler for now
-	local BestDirection, BestSize, BestDot = Axes[1].Direction, Axes[1].Size, -math.huge
-	-- BestDot starts at negative math.huge on purpose, that way literally any real dot product we calculate below is guaranteed to be bigger
-	-- than it, so our placeholder guess gets overwritten immediately on the first loop pass anyway
+	local BestDirection, BestSize, BestDot = Axes[1].Direction, Axes[1].Size, -math.huge -- start with face 1 as a placeholder guess before the loop runs
 
-	-- this loop goes through all 6 entries in Axes one at a time
-	-- (right, left, up, down, front, back)
-	for _, Axis in Axes do
-		local Dot = Axis.Direction:Dot(Vector3.new(0, 1, 0)) --this number tells us how much a direction points "up". closer to 1 = pointing straight up, 0 = pointing sideways, negative = pointing down
+	for _, Axis in Axes do -- loop through all 6 faces one at a time
+		local Dot = Axis.Direction:Dot(Vector3.new(0, 1, 0)) -- get how much this face points upward, closer to 1 means more upward
 
-		-- if this face is more upward-facing than whatever weve found so far, replace our "best" with this one
-		if Dot > BestDot then
-			BestDot = Dot --best score of face thats facing upward (closer to 1 = more upward)
-			BestDirection = Axis.Direction --tells what way the top face points in worldspace
-			BestSize = Axis.Size --the parts thickness along the faces axis we use it later in local WorldTop to figure out the physical distance from center to that surface
+		if Dot > BestDot then -- check if this face points more upward than whatever we found so far
+			BestDot = Dot -- store the new best upward score
+			BestDirection = Axis.Direction -- store the direction of the new best face
+			BestSize = Axis.Size -- store the size along the new best faces axis
 		end
-		-- if its not better, we just move on to the next face,
-		-- BestDirection/BestSize/BestDot stay unchanged
 	end
-	--after that loop were left with whichever of the 6 faces points closest to straight up
 
-	local WorldTop = Instance.Position + BestDirection * (BestSize / 2) --in order to get the surface of a part we start from using Instance.Position but the issue is that gives us only the center of the part, using
-	--some simple math we can just use BestSize divided by 2 (since it already starts from the center) then we just use BestDirection to step outward to get on the top surface of our part
-	return Vector3.new(RaycastResult.Position.X, WorldTop.Y, RaycastResult.Position.Z) --keep the X and Z from wherever the ray actually hit, but swap in the real height (Y) of the top face we just found
+	local WorldTop = Instance.Position + BestDirection * (BestSize / 2) -- step outward from the parts center to the actual top surface using half the parts size along that axis
+
+	return Vector3.new(RaycastResult.Position.X, WorldTop.Y, RaycastResult.Position.Z) -- keep the x and z from where the ray hit but use the real height of the top face we found
 end
 
--- a raycast result only counts as a grabbable ledge if it actually hit something and that something is tagged with our LEDGE_TAG
 local function IsClimbableLedge(RaycastResult)
-	return RaycastResult ~= nil and CollectionService:HasTag(RaycastResult.Instance, LEDGE_TAG)
+	return RaycastResult ~= nil and CollectionService:HasTag(RaycastResult.Instance, LEDGE_TAG) -- check the raycast actually hit something and that its tagged as a ledge
 end
 
--- stops every grab animation at once, used whenever were about to switch to a different animation or leave the hanging state entirely.
 local function StopAllGrabAnimations()
-	IdleGrabAnimation:Stop()
-	LeftGrabAnimation:Stop()
-	RightGrabAnimation:Stop()
-	JumpGrabAnimation:Stop()
+	IdleGrabAnimation:Stop() -- stop the idle hang animation
+	LeftGrabAnimation:Stop() -- stop the left grab animation
+	RightGrabAnimation:Stop() -- stop the right grab animation
+	JumpGrabAnimation:Stop() -- stop the climb animation
 end
 
--- picks which grab animation to play based on which way were pressing.
--- Direction here is basically how much are we holding left/right as a number from HandleMoveDirectionChangeds dot product below
 local function PlayGrabAnimation(Direction)
 	if Direction > 0.3 then
-		-- without this check, every single MoveDirection update (which can fire
-		-- multiple times a frame) would call :Play() again
-		if RightGrabAnimation.IsPlaying then return end
-		IdleGrabAnimation:Stop()
-		LeftGrabAnimation:Stop()
-		RightGrabAnimation.Priority = Enum.AnimationPriority.Action4 -- Action4 is the highest priority tier, guarantees this overrides any lower-priority animation still trying to play on the same body parts
-		RightGrabAnimation.Looped = true
-		RightGrabAnimation:Play()
+		if RightGrabAnimation.IsPlaying then return end -- return early so MoveDirection updates firing multiple times a frame dont keep calling play (used in mainloop)
+
+		IdleGrabAnimation:Stop() -- stop the idle animation before switching
+		LeftGrabAnimation:Stop() -- stop the left animation before switching
+		RightGrabAnimation.Priority = Enum.AnimationPriority.Action4 -- set the right grab animations priority to 4 to override any other animation
+		RightGrabAnimation.Looped = true -- make the right animation loop
+		RightGrabAnimation:Play() -- play the right grab animation
 	elseif Direction < -0.3 then
-		-- same idea but for leaning left
-		if LeftGrabAnimation.IsPlaying then return end
-		IdleGrabAnimation:Stop()
-		RightGrabAnimation:Stop()
-		LeftGrabAnimation.Priority = Enum.AnimationPriority.Action4
-		LeftGrabAnimation.Looped = true
-		LeftGrabAnimation:Play()
+		if LeftGrabAnimation.IsPlaying then return end -- return early for the same reason as the right side check
+
+		IdleGrabAnimation:Stop() -- stop the idle animation before switching
+		RightGrabAnimation:Stop() -- stop the right animation before switching
+		LeftGrabAnimation.Priority = Enum.AnimationPriority.Action4 -- set the left grab animations priority to 4 to override any other animation
+		LeftGrabAnimation.Looped = true -- make the left animation loop
+		LeftGrabAnimation:Play() -- play the left grab animation
 	else
-		-- not really leaning either way, so just idle-hang instead
-		if IdleGrabAnimation.IsPlaying then return end
-		LeftGrabAnimation:Stop()
-		RightGrabAnimation:Stop()
-		IdleGrabAnimation.Priority = Enum.AnimationPriority.Action4
-		IdleGrabAnimation.Looped = true
-		IdleGrabAnimation:Play()
+		if IdleGrabAnimation.IsPlaying then return end -- return early if the idle animation is already playing
+
+		LeftGrabAnimation:Stop() -- stop the left animation before switching
+		RightGrabAnimation:Stop() -- stop the right animation before switching
+		IdleGrabAnimation.Priority = Enum.AnimationPriority.Action4 -- set the idle grab/hang animations priority to 4 to override any other animation
+		IdleGrabAnimation.Looped = true -- make the idle animation loop
+		IdleGrabAnimation:Play() -- play the idle hang animation
 	end
 end
 
--- destroys anything we made for the current ledge grab (the invisible anchor part,
--- both attachments, and both align constraints) so we dont leak instances every
--- time we grab a new ledge. if we didnt do this, every single ledge grab would
--- create a brand new Part + 2 Attachments + 2 Constraints and just leave the old
--- ones sitting in the workspace forever, since nothing else is destroying them.
-local function ClearLedgeConstraints() --a function to clear constraints to prevent memory leaks we run it at the start of CreateLedgeConstraints
-	if PositionAlign then PositionAlign:Destroy() PositionAlign = nil end
-	if OrientationAlign then OrientationAlign:Destroy() OrientationAlign = nil end
-	if RootAttachment then RootAttachment:Destroy() RootAttachment = nil end
-	if AnchorAttachment then AnchorAttachment:Destroy() AnchorAttachment = nil end
-	if LedgeAnchor then LedgeAnchor:Destroy() LedgeAnchor = nil end
+local function ClearLedgeConstraints()
+	if PositionAlign then PositionAlign:Destroy() PositionAlign = nil end -- destroy the position constraint if it exists
+	if OrientationAlign then OrientationAlign:Destroy() OrientationAlign = nil end -- destroy the orientation constraint if it exists
+	if RootAttachment then RootAttachment:Destroy() RootAttachment = nil end -- destroy the root attachment if it exists
+	if AnchorAttachment then AnchorAttachment:Destroy() AnchorAttachment = nil end -- destroy the anchor attachment if it exists
+	if LedgeAnchor then LedgeAnchor:Destroy() LedgeAnchor = nil end -- destroy the anchor part if it exists
 end
 
-local function CreateLedgeConstraints() --when we find a ledge we dont just use CFrame = LedgeCFrame but instead use these constraints to move the character to the ledge.
-	--it uses two attachments, an AlignPosition and an AlignOrientation. directly setting a characters CFrame every frame fights the Roblox physics engine. our character
-	--has a Humanoid, collision, gravity, its own velocity and etc... snapping its CFrame is like teleporting it which can cause jitter, clip through walls, break other systems (network ownership, camera smoothing)
-	ClearLedgeConstraints() -- clean up any leftovers from a previous grab first, see the comment above ClearLedgeConstraints for why this matters
+local function CreateLedgeConstraints()
+	ClearLedgeConstraints() -- clean up any leftovers from a previous grab first and we can always start clean/prevent memory leaks
 
-	-- this invisible anchor part is basically a "target" floating in the world at
-	-- the ledges position. instead of moving the character directly, we move this
-	-- separate throwaway part, and let the constraints below pull the character
-	-- towards it. the reason we need a whole extra part for this rather than just
-	-- constraining the character straight to a Vector3/CFrame is because Roblox constraints
-	-- (AlignPosition/AlignOrientation) require an Attachment on both ends, and an
-	-- Attachment has to be parented to some Instance that physically exists in the
-	-- world, it cant just float at a bare position with nothing to attach to.
-	-- so we make this tiny invisible part purely to give the target attachment
-	-- somewhere to live
-	LedgeAnchor = Instance.new("Part") --we create a new part called LedgeAnchor
-	LedgeAnchor.Size = Vector3.one
-	LedgeAnchor.Anchored = true
-	--determines whether a part is immovable by physics.
-	LedgeAnchor.CanCollide = false
-	--determines whether a part will physically interact with other parts.
-	LedgeAnchor.CanTouch = false
-	--this property determines if Touched and TouchEnded events fire on the part.
-	LedgeAnchor.CanQuery = false
-	--this property determines whether the part is considered during spatial query operations, such as GetPartBoundsInBox or Raycast
-	LedgeAnchor.Transparency = 1 --just turns the part invisible lol
-	LedgeAnchor.Parent = workspace
-	--engine only steps things inside the workspace so if we put it inside ServerStorage or nil parent the engine skips it
+	LedgeAnchor = Instance.new("Part") -- create the invisible anchor part that acts as our target
+	LedgeAnchor.Size = Vector3.one -- keep the anchor tiny since its never actually seen
+	LedgeAnchor.Anchored = true -- stop the anchor from being affected by physics
+	LedgeAnchor.CanCollide = false -- stop the anchor from physically colliding with anything
+	LedgeAnchor.CanTouch = false -- stop Touched events from firing on the anchor
+	LedgeAnchor.CanQuery = false -- exclude the anchor from raycasts and spatial queries
+	LedgeAnchor.Transparency = 1 -- make the anchor invisible
+	LedgeAnchor.Parent = workspace -- parent to workspace since the engine only simulates whats inside it
 
-	-- attachments are just connection points that constraints hook onto, one on
-	-- our characters root part and one on the invisible anchor. AlignPosition and
-	-- AlignOrientation both specifically require an Attachment0 and Attachment1 to
-	-- know what two points theyre trying to pull together, you cant point a
-	-- constraint directly at a Part, only at an Attachment
-	RootAttachment = Instance.new("Attachment") --atch 0
-	RootAttachment.Parent = RootPart ----local RootPart = Character:WaitForChild("HumanoidRootPart"), this was set to the top
-	AnchorAttachment = Instance.new("Attachment") --atch 1
-	AnchorAttachment.Parent = LedgeAnchor
+	RootAttachment = Instance.new("Attachment") -- create the attachment the constraints pull from
+	RootAttachment.Parent = RootPart -- parent it to the characters root part
+	AnchorAttachment = Instance.new("Attachment") -- create the attachment the constraints pull toward
+	AnchorAttachment.Parent = LedgeAnchor -- parent it to the anchor part
 
-	PositionAlign = Instance.new("AlignPosition")
-	PositionAlign.Attachment0 = RootAttachment
-	PositionAlign.Attachment1 = AnchorAttachment
-	PositionAlign.MaxForce = 50000
-	--maximum force magnitude the constraint can apply to achieve its goal
-	PositionAlign.MaxVelocity = 20
-	--maximum speed the attachments can move when converging
-	PositionAlign.Responsiveness = 25
-	--controls how quickly the constraint reaches its goal
-	PositionAlign.RigidityEnabled = false
-	--whether force is dependent on other properties, or if the physics solver reacts as quickly as possible to complete the alignment
-	PositionAlign.Parent = RootPart
+	PositionAlign = Instance.new("AlignPosition") -- create the constraint that pulls the character to the anchors position
+	PositionAlign.Attachment0 = RootAttachment -- set the attachment on the character
+	PositionAlign.Attachment1 = AnchorAttachment -- set the attachment on the anchor
+	PositionAlign.MaxForce = 50000 -- cap how much force the constraint can apply
+	PositionAlign.MaxVelocity = 20 -- cap how fast the attachments can converge
+	PositionAlign.Responsiveness = 25 -- control how quickly the constraint reaches its goal
+	PositionAlign.RigidityEnabled = false -- let the physics solver ease into the alignment instead of snapping instantly
+	PositionAlign.Parent = RootPart -- parent the constraint to the root part
 
-	-- same reasoning as AlignPosition above, but this one handles rotation instead
-	-- of position, so the characters facing direction also gets pulled to match
-	-- the ledges orientation, not just its position
-	OrientationAlign = Instance.new("AlignOrientation")
-	OrientationAlign.Attachment0 = RootAttachment
-	OrientationAlign.Attachment1 = AnchorAttachment
-	OrientationAlign.MaxTorque = 50000
-	--maximum torque the constraint can use to reach its goal
-	OrientationAlign.MaxAngularVelocity = 20
-	--maximum angular velocity the constraint can use to reach its goal
-	OrientationAlign.Responsiveness = 25
-	--controls how quickly the constraint reaches its goal
-	OrientationAlign.RigidityEnabled = false
-	OrientationAlign.Parent = RootPart
+	OrientationAlign = Instance.new("AlignOrientation") -- create the constraint that pulls the characters rotation to match the anchor
+	OrientationAlign.Attachment0 = RootAttachment -- set the attachment on the character
+	OrientationAlign.Attachment1 = AnchorAttachment -- set the attachment on the anchor
+	OrientationAlign.MaxTorque = 50000 -- cap how much torque the constraint can apply
+	OrientationAlign.MaxAngularVelocity = 20 -- cap how fast the rotation can converge
+	OrientationAlign.Responsiveness = 25 -- control how quickly the constraint reaches its goal
+	OrientationAlign.RigidityEnabled = false -- let the physics solver ease into the rotation instead of snapping instantly
+	OrientationAlign.Parent = RootPart -- parent the constraint to the root part
 
 	return LedgeAnchor
 end
 
---we use a raycast to check if we have spaces above us to stand on instead of relying on the parts size cause
---a part doesnt know if a part is on top of it
 local function HasClearHeadroom(LedgeCFrame)
-	-- Origin is offset slightly below  and forward of the ledges position, direction is UpVector * 3 (so it casts
-	-- 3 studs upward). workspace:Raycast returns a RaycastResult if it hits
-	-- something in that space, or nil if the path is clear
 	local TopCheck = workspace:Raycast(
-		LedgeCFrame.Position + Vector3.new(0, -1, 0) + LedgeCFrame.LookVector,
-		LedgeCFrame.UpVector * 3,
+		LedgeCFrame.Position + Vector3.new(0, -1, 0) + LedgeCFrame.LookVector, -- cast from slightly below and forward of the ledges position since a parts size alone cant tell us whats above it
+		LedgeCFrame.UpVector * 3, -- aim 3 studs upward to check for headroom
 		RaycastFilter
 	)
-	return TopCheck == nil -- nil means the ray hit nothing, meaning the space above is clear
+	return TopCheck == nil -- nil means the ray hit nothing so the space above is clear
 end
 
--- handles moving sideways onto a neighboring ledge. takes the raycast hit
--- that found the new ledge, figures out its top surface, and if were close
--- enough and theres headroom, tweens our invisible anchor over to it
 local function MoveToLedge(RaycastResult, DirectionName)
-	local WorldPosition = GetLedgeTop(RaycastResult)
-	local LedgeCFrame = CFrame.lookAt(WorldPosition, WorldPosition - RaycastResult.Normal)
+	local WorldPosition = GetLedgeTop(RaycastResult) -- get the top surface position of the new ledge with GetLedgeTop
+	local LedgeCFrame = CFrame.lookAt(WorldPosition, WorldPosition - RaycastResult.Normal) -- build a cframe at the ledge facing away from the wall
 
-	-- return if theres no room to stand, or if the new spot is actually too far to reach
-	if not HasClearHeadroom(LedgeCFrame) then return end
-	if (WorldPosition - Head.Position).Magnitude >= SideMoveReachDistance then return end
+	if not HasClearHeadroom(LedgeCFrame) then return end -- return if theres no room to stand there
+	if (WorldPosition - Head.Position).Magnitude >= SideMoveReachDistance then return end -- return if the new spot is too far to reach
 
-	-- tween anchor so moving to the ledge doesnt look like we teleport to it
-	local Target = LedgeCFrame + Vector3.new(0, -2, 0) + LedgeCFrame.LookVector * -1
+	local Target = LedgeCFrame + Vector3.new(0, -2, 0) + LedgeCFrame.LookVector * -1 -- offset the target slightly below and behind the ledge edge
 	TweenService:Create(
-		LedgeAnchor,
-		TweenInfo.new(0.3, Enum.EasingStyle.Sine, Enum.EasingDirection.Out),
-		{CFrame = Target}
+		LedgeAnchor, -- tween the anchor 
+		TweenInfo.new(0.3, Enum.EasingStyle.Sine, Enum.EasingDirection.Out), -- 0.3 ease in and out
+		{CFrame = Target} -- tween the anchors cframe to the new ledge
 	):Play()
 
-	State:LockSideMove(SideMoveDelay) -- brief cooldown so this cant be spammed every frame
+	State:LockSideMove(SideMoveDelay) -- put side moving on a brief cooldown so it cant be spammed every frame
 
 	if DirectionName == "Right" then
-		RightGrabAnimation:Play()
+		RightGrabAnimation:Play() -- play the right side move animation
 	elseif DirectionName == "Left" then
-		LeftGrabAnimation:Play()
+		LeftGrabAnimation:Play() -- play the left side move animation
 	end
 end
 
--- casts a couple rays out to the side to look for a ledge we could move onto.
--- Direction is a signed distance (positive = right, negative = left)
 local function AttemptSideMove(Direction, AnimationName)
-	if not State.CanSideMove then return end -- still on cooldown from the last side move, dont bother
+	if not State.CanSideMove then return end -- return if were still on cooldown from the last side move
 
-	-- the first ray shoots from the players head angled sideways plus forward to try to find a ledge in either direction
 	local SideHit = workspace:Raycast(
-		Head.Position,
-		Head.CFrame.RightVector * Direction + Head.CFrame.LookVector * 8,
+		Head.Position, -- cast from the head
+		Head.CFrame.RightVector * Direction + Head.CFrame.LookVector * 8, -- aim sideways plus forward to look for a ledge in that direction
 		RaycastFilter
 	)
 	if IsClimbableLedge(SideHit) then
-		MoveToLedge(SideHit, AnimationName)
+		MoveToLedge(SideHit, AnimationName) -- move onto the ledge we found
 		return
 	end
 
-	--the second ray runs if the first one misses and checks around to see if theres a corner of the ledge
 	local CornerHit = workspace:Raycast(
-		Head.Position + Vector3.new(0, -1, 0) + Head.CFrame.RightVector * Direction,
-		Head.CFrame.RightVector * -Direction + Head.CFrame.LookVector * 2,
+		Head.Position + Vector3.new(0, -1, 0) + Head.CFrame.RightVector * Direction, -- cast from slightly below and off to the side
+		Head.CFrame.RightVector * -Direction + Head.CFrame.LookVector * 2, -- aim back toward the ledge to check for a corner
 		RaycastFilter
 	)
 	if IsClimbableLedge(CornerHit) then
-		MoveToLedge(CornerHit, AnimationName)
+		MoveToLedge(CornerHit, AnimationName) -- move onto the corner ledge we found
 	end
 end
 
--- handles actually climbing up and off the ledge were currently hanging on
 local function ClimbUp()
-	if not State.Hanging then return end -- cant climb up if were not even hanging
+	if not State.Hanging then return end -- return early if were not even hanging
 
-	-- exit the hanging state and clean everything up
-	State:EndHang() --we enter EndHang state after we climb up
-	Humanoid.AutoRotate = true -- reenable AutoRotate so the player can look and move around with shiftlock again too
-	ClearLedgeConstraints()
-	StopAllGrabAnimations()
-	LedgeReleased:Fire()
+	State:EndHang() -- exit the hanging state
+	Humanoid.AutoRotate = true -- turning autorotation back on so the player can look and move with shiftlock again
+	ClearLedgeConstraints() -- getting rid of the anchor and constraints after we enter endhangstate to prevent memory leaks
+	StopAllGrabAnimations() -- stopping whatever grab animations are still playing
+	LedgeReleased:Fire() -- firing the LedgeReleased event
 
-	-- play the climbing animation
-	JumpGrabAnimation.Priority = Enum.AnimationPriority.Action4
-	JumpGrabAnimation.Looped = false
-	JumpGrabAnimation:Play()
-	local BoostAttachment = Instance.new("Attachment")
-	BoostAttachment.Parent = RootPart
+	JumpGrabAnimation.Priority = Enum.AnimationPriority.Action4 -- setting the climb animation priority to 4 to override any other animation
+	JumpGrabAnimation.Looped = false -- the climb animation only plays once
+	JumpGrabAnimation:Play() -- play the climb animation
 
-	local Boost = Instance.new("LinearVelocity")
-	Boost.Attachment0 = BoostAttachment
-	Boost.MaxForce = 67
-	Boost.RelativeTo = Enum.ActuatorRelativeTo.World -- we want this boost direction fixed in world space (always "up and forward" in absolute terms), not relative to the characters current rotation, which could be tilted from the AlignOrientation we just turned off
-	Boost.VectorVelocity = RootPart.CFrame.LookVector * JumpForwardForce + Vector3.new(0, JumpUpForce, 0)
-	Boost.Parent = RootPart
+	local BoostAttachment = Instance.new("Attachment") -- creating an attachment to hold the boost
+	BoostAttachment.Parent = RootPart -- parenting the attachment to the root part
 
-	-- Debris:AddItem auto-destroys these after BoostDuration seconds. we use Debris here instead of a manual task.delay(...):Destroy() because its a temporary cleanup task
-	Debris:AddItem(BoostAttachment, BoostDuration)
+	local Boost = Instance.new("LinearVelocity") -- creating the linear velocity thatll push the character up and over the ledge
+	Boost.Attachment0 = BoostAttachment -- setting the attachment the velocity applies force through
+	Boost.MaxForce = 67 -- capping how much force the boost can apply to 67 hahaha 67
+	Boost.RelativeTo = Enum.ActuatorRelativeTo.World -- keep the boost direction fixed in world space instead of relative to the players rotation
+	Boost.VectorVelocity = RootPart.CFrame.LookVector * JumpForwardForce + Vector3.new(0, JumpUpForce, 0) -- setting the boost direction to up and forward
+	Boost.Parent = RootPart -- parenting the boost to the root part so it actually applies
 
-	Humanoid:ChangeState(Enum.HumanoidStateType.Jumping) -- forces the Humanoids internal state machine into Jumping s
+	Debris:AddItem(BoostAttachment, BoostDuration) -- letting Debris clean up the attachment after BoostDuration seconds instead of doing it manually
+	Humanoid:ChangeState(Enum.HumanoidStateType.Jumping) -- forcing the Humanoids state into Jumping
 
-	-- after the cooldown, stop the climb animation and let ourselves grab ledges again
-	task.delay(GrabCooldown, function()
-		JumpGrabAnimation:Stop()
-		State:AllowGrabAfter(0)
+	task.delay(GrabCooldown, function() -- wait for the cooldown before allowing another grab
+		JumpGrabAnimation:Stop() -- stop climb animation once the cooldown is up
+		State:AllowGrabAfter(0) -- let the player grab the ledge again
 	end)
 end
 
 local CLIMB_ACTION_NAME = "ClimbUpLedge"
 
---only fires on initial key press, if its not Begin or were not hanging we return pass
 local function HandleClimbAction(_ActionName, InputState)
 	if InputState ~= Enum.UserInputState.Begin then
-		return Enum.ContextActionResult.Pass -- only react on the first press not on repeat/end states
+		return Enum.ContextActionResult.Pass -- pass if this isnt the first press so repeats and releases dont trigger it
 	end
 	if not State.Hanging then
-		return Enum.ContextActionResult.Pass
+		return Enum.ContextActionResult.Pass -- pass if were not even hanging
 	end
-	--only when both pass we call sink on ClimbUp()
-	ClimbUp()
-	return Enum.ContextActionResult.Sink -- sink means that the input was handled and nothing else should pass onto it
+	ClimbUp() -- call ClimbUp since both checks passed
+	return Enum.ContextActionResult.Sink -- sink so nothing else reacts to this input
 end
 
---using ContextActionService lets us cover the action for both controller and spacebar. the pass/sink means we also dont
---have to manually track whether the input gets used already
 ContextActionService:BindAction(
-	CLIMB_ACTION_NAME,
-	HandleClimbAction,
-	true,
-	Enum.KeyCode.Space,
-	Enum.KeyCode.ButtonA
+	CLIMB_ACTION_NAME, -- name for this action
+	HandleClimbAction, -- function that handles the input
+	true, -- create a touch button for mobile
+	Enum.KeyCode.Space, -- bind to spacebar
+	Enum.KeyCode.ButtonA -- bind to controller button a
 )
-ContextActionService:SetTitle(CLIMB_ACTION_NAME, "Climb")
+ContextActionService:SetTitle(CLIMB_ACTION_NAME, "Climb") -- set the label shown on the touch button
 
 
--- this is the main loop that constantly checks to grab a ledge or not
--- we use RunService.Heartbeat over a Touched event on ledge parts,
--- because Heartbeat lets us run our own conditions every frame (distance, angle,
--- airborne state, cooldowns) instead of reacting only when the touched event fires
 RunService.Heartbeat:Connect(function()
-	
-	
-	--we use movedirection because it directly tells us which way the player is holding
-	--the movement input (like holding down a or d) the dot product against RightVector converts
-	--how far left or right we are relative to the way were facing. If we used an event outside
-	--this loop instead of running every fame it would just wait for it to change and sometimes
-	--just not sidemove at all
-	
-	
 	if State.Hanging then
-		local Amount = Humanoid.MoveDirection:Dot(RootPart.CFrame.RightVector)
+		local Amount = Humanoid.MoveDirection:Dot(RootPart.CFrame.RightVector) -- get how far left or right the input is compared to which way were facing
 		if Amount > 0.7 then
-			PlayGrabAnimation(1)
-			AttemptSideMove(SideMoveDistance, "Right")
+			PlayGrabAnimation(1) -- play the right grab animation
+			AttemptSideMove(SideMoveDistance, "Right") -- attempt to side move to the right of the ledge
 		elseif Amount < -0.7 then
-			PlayGrabAnimation(-1)
-			AttemptSideMove(-SideMoveDistance, "Left")
+			PlayGrabAnimation(-1) -- play the left grab animation
+			AttemptSideMove(-SideMoveDistance, "Left") -- attempt to side move to the left of the ledge
 		else
-			PlayGrabAnimation(0)
+			PlayGrabAnimation(0) -- play the idle hang animation since theres no side input
 		end
-		return -- no need to run ledge-detection below while already hanging
+		return -- return early so ledge detection below doesnt run while were already hanging
 	end
-
-	-- we return if we cant grab so we dont just run Heartbeat like a bot
-	if not State.CanGrab then return end
-	-- shoot a ray forward from the character to see if theres a wall/ledge in front of us. origin is RootPart.Position, direction is
-	-- LookVector * DetectDistance (forward, out to DetectDistance studs). Hit will
-	-- either be a RaycastResult or nil depending on whether anythings in the way
-	local Hit = workspace:Raycast(RootPart.Position, RootPart.CFrame.LookVector * DetectDistance, RaycastFilter)
-	if not IsClimbableLedge(Hit) then return end
-	-- figure out exactly where the top surface of that ledge actually is
-	local WorldPosition = GetLedgeTop(Hit)
-	local LedgeCFrame = CFrame.lookAt(WorldPosition, WorldPosition - Hit.Normal)
-	-- too far away to actually reach it, or no headroom to stand there so we just return and dont ledge
-	if (WorldPosition - Head.Position).Magnitude >= GrabReachDistance then return end
-	if not HasClearHeadroom(LedgeCFrame) then return end
-	-- only allow grabbing while were actually in the air and falling/jumping.
-	local IsAirborne = Humanoid.FloorMaterial == Enum.Material.Air
+	if not State.CanGrab then return end -- return early if grabbing isnt allowed right now
+	local Hit = workspace:Raycast(RootPart.Position, RootPart.CFrame.LookVector * DetectDistance, RaycastFilter) -- cast a ray forward from the root part to check for a ledge
+	if not IsClimbableLedge(Hit) then return end -- return early if whatever we hit wasnt a ledge
+	local WorldPosition = GetLedgeTop(Hit) -- get the actual top surface position of the ledge with GetLedgeTop
+	local LedgeCFrame = CFrame.lookAt(WorldPosition, WorldPosition - Hit.Normal) -- build a cframe at the ledge facing away from the wall
+	if (WorldPosition - Head.Position).Magnitude >= GrabReachDistance then return end -- return early if the ledge is too far to reach
+	if not HasClearHeadroom(LedgeCFrame) then return end -- return early if theres no room to stand there
+	local IsAirborne = Humanoid.FloorMaterial == Enum.Material.Air -- check if were not touching the ground
 	local IsFalling = Humanoid:GetState() == Enum.HumanoidStateType.Freefall
-		or Humanoid:GetState() == Enum.HumanoidStateType.Jumping
-	if not (IsAirborne and IsFalling) then return end
-	-- if everything checks out we can perform the actual grab onto a ledge
-	-- set up the invisible anchor and physics constraints, then snap them
-	-- into place right at the ledge (with a small offset so the character
-	-- hangs slightly below/behind the edge)
-	local Anchor = CreateLedgeConstraints()
-	Anchor.CFrame = LedgeCFrame + Vector3.new(0, -2, 0) + LedgeCFrame.LookVector * -1
-	Humanoid.AutoRotate = false --disable autorotation so camera shift lock doestn get in the way to make it look weird as shit
-	State:BeginHang()
-	StopAllGrabAnimations()
-	LedgeGrabbed:Fire()
-	IdleGrabAnimation.Priority = Enum.AnimationPriority.Action4
-	IdleGrabAnimation.Looped = true
-	IdleGrabAnimation:Play()
+		or Humanoid:GetState() == Enum.HumanoidStateType.Jumping -- check if were currently falling or jumping
+	if not (IsAirborne and IsFalling) then return end -- return early if were not airborne and falling
+	local Anchor = CreateLedgeConstraints() -- call CreateLedgeConstraints to set up the invisible anchor and physics constraints for the hang
+	Anchor.CFrame = LedgeCFrame + Vector3.new(0, -2, 0) + LedgeCFrame.LookVector * -1 -- place the anchor slightly below and behind the ledge edge
+	Humanoid.AutoRotate = false -- turn off autorotation
+	State:BeginHang() -- enter the ledge hang state
+	StopAllGrabAnimations() -- stop whatever grab animations are still playing
+	LedgeGrabbed:Fire() -- fire the LedgeGrabbed event
+	IdleGrabAnimation.Priority = Enum.AnimationPriority.Action4 -- set the idle hang animations priority to 4 to override any other animation
+	IdleGrabAnimation.Looped = true -- make the idle hang animation loop
+	IdleGrabAnimation:Play() -- play the idle hang animation
 end)
 
--- cleanup for cas and the ledge constraints when the character dies or respawns to prevent memory leaks
+
 Player.CharacterRemoving:Connect(function()
-	ContextActionService:UnbindAction(CLIMB_ACTION_NAME)
-	ClearLedgeConstraints()
+	ContextActionService:UnbindAction(CLIMB_ACTION_NAME) -- unbind the ledge grab action
+	ClearLedgeConstraints() -- remove the ledge constraints 
 end) 
