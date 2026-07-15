@@ -198,7 +198,7 @@ local function StopAllGrabAnimations()
 	JumpGrabAnimation:Stop() -- stop the climb animation
 end
 
-local function PlayGrabAnimation(Direction)
+local function PlayGrabAnimation(Direction) -- Direction is the dot product number thats used from the main loop in heartbeat
 	if Direction > 0.3 then
 		if RightGrabAnimation.IsPlaying then return end -- return early so MoveDirection updates firing multiple times a frame dont keep calling play (used in mainloop)
 
@@ -304,7 +304,7 @@ local function MoveToLedge(RaycastResult, DirectionName)
 	end
 end
 
-local function AttemptSideMove(Direction, AnimationName)
+local function AttemptSideMove(Direction, AnimationName) local function AttemptSideMove(Direction, AnimationName) -- Direction is positive or negative depending which side to raycast toward, AnimationName is just "Right" or "Left" and decides which grab animation plays
 	if not State.CanSideMove then return end -- return if were still on cooldown from the last side move
 
 	local SideHit = workspace:Raycast(
