@@ -304,7 +304,7 @@ local function MoveToLedge(RaycastResult, DirectionName)
 	end
 end
 
-local function AttemptSideMove(Direction, AnimationName) local function AttemptSideMove(Direction, AnimationName) -- Direction is positive or negative depending which side to raycast toward, AnimationName is just "Right" or "Left" and decides which grab animation plays
+local function AttemptSideMove(Direction, AnimationName) -- Direction is positive or negative depending which side to raycast toward, AnimationName is just "Right" or "Left" and decides which grab animation plays
 	if not State.CanSideMove then return end -- return if were still on cooldown from the last side move
 
 	local SideHit = workspace:Raycast(
@@ -422,4 +422,4 @@ end)
 Player.CharacterRemoving:Connect(function()
 	ContextActionService:UnbindAction(CLIMB_ACTION_NAME) -- unbind the ledge grab action
 	ClearLedgeConstraints() -- remove the ledge constraints 
-end) 
+end)
